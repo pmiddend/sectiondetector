@@ -16,7 +16,7 @@ build-type:          Simple
 cabal-version:       >=1.10
 
 executable sectiondetector
-  main-is:             Main.hs
+  main-is:             SectionDetector/Main.hs
   hs-source-dirs: src
   -- other-modules:       
   -- other-extensions:    
