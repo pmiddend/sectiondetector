@@ -19,8 +19,8 @@ import           System.IO                  (BufferMode (..), Handle,
                                              hSetBuffering)
 import           System.Process
 
-playerCommand :: FilePath -> CmdSpec
-playerCommand fp = ShellCommand $ "mpv -volume 0 --no-msg-color --term-status-msg='${=time-pos}' '" <> fp <> "'"
+playerCommand :: String -> FilePath -> CmdSpec
+playerCommand aspect fp = ShellCommand $ "mpv --video-aspect " <> aspect <> "-volume 0 --no-msg-color --term-status-msg='${=time-pos}' '" <> fp <> "'"
 
 type TimeStamp = Int
 
@@ -89,9 +89,9 @@ myProcess fp = CreateProcess {
   , delegate_ctlc = False
   }
 
-detectSections :: FilePath -> IO [Section]
-detectSections filename = do
-  output <- createProcessPretty (myProcess (playerCommand filename))
+detectSections :: String -> FilePath -> IO [Section]
+detectSections aspect filename = do
+  output <- createProcessPretty (myProcess (playerCommand aspect filename))
   let ehandle = output ^?! (processErrHandle . _Just)
   hSetBuffering ehandle NoBuffering
   let ps = PlayState {
