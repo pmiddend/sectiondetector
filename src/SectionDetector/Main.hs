@@ -6,6 +6,6 @@ import SectionDetector.DetectSections
 main :: IO ()
 main = do
   (filename:_) <- getArgs
-  finalState <- detectSections "-1" filename
+  finalState <- detectSections "-1" 0 filename
   print finalState
 

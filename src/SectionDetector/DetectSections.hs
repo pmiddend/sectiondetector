@@ -2,12 +2,20 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
-module SectionDetector.DetectSections where
+module SectionDetector.DetectSections(
+    detectSections
+  , Section
+  , sectionBegin
+  , sectionEnd
+  , sectionDuration
+  , filterSections
+  ) where
 
+import Control.Applicative
 import           Control.Lens
 import           Control.Monad.State.Strict
 import           Data.Monoid                ((<>))
-import           Data.Text                  (Text)
+import           Data.Text                  (Text,pack)
 import           Data.Text.IO               (hGetLine)
 import           Data.Text.Read             (decimal)
 import           Prelude                    hiding (putStrLn, read)
@@ -19,8 +27,8 @@ import           System.IO                  (BufferMode (..), Handle,
                                              hSetBuffering)
 import           System.Process
 
-playerCommand :: String -> FilePath -> CmdSpec
-playerCommand aspect fp = ShellCommand $ "mpv --video-aspect " <> aspect <> "-volume 0 --no-msg-color --term-status-msg='${=time-pos}' '" <> fp <> "'"
+playerCommand :: String -> Int -> FilePath -> CmdSpec
+playerCommand aspect start fp = ShellCommand $ "mpv --start="<> show start <>" --video-aspect " <> aspect <> " -volume 0 --term-osd=force --no-msg-color --term-status-msg='${=time-pos}' '" <> fp <> "'"
 
 type TimeStamp = Int
 
@@ -48,6 +56,7 @@ type PlayStateMonad = StateT PlayState IO
 nextLine :: PlayStateMonad (Maybe Text)
 nextLine = do
   h <- use streamHandle
+--   Just <$> liftIO (hGetLine h)
   tryAndDoNothing (hGetLine h)
 
 parseLine :: Text -> Maybe TimeStamp
@@ -59,6 +68,7 @@ parseLine t = case decimal t of
 mainLoop :: PlayStateMonad ()
 mainLoop = do
   line' <- nextLine
+--   liftPutStrLn (pack (show line'))
   case line' of
     Nothing -> return ()
     Just line -> case parseLine line of
@@ -89,9 +99,9 @@ myProcess fp = CreateProcess {
   , delegate_ctlc = False
   }
 
-detectSections :: String -> FilePath -> IO [Section]
-detectSections aspect filename = do
-  output <- createProcessPretty (myProcess (playerCommand aspect filename))
+detectSections :: String -> Int -> FilePath -> IO [Section]
+detectSections aspect start filename = do
+  output <- createProcessPretty (myProcess (playerCommand aspect start filename))
   let ehandle = output ^?! (processErrHandle . _Just)
   hSetBuffering ehandle NoBuffering
   let ps = PlayState {
