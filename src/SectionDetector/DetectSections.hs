@@ -18,7 +18,7 @@ import           Control.Monad.State.Strict
 import           Data.Monoid                ((<>),mempty)
 import           Data.Text                  (Text,pack)
 import           Data.Text.IO               (hGetLine)
-import           Data.Text.Read             (decimal)
+import           Data.Text.Read             (decimal,double)
 import           Prelude                    hiding (putStrLn, read)
 import           SectionDetector.Exception  (tryAndDoNothing)
 import           SectionDetector.Lifted     (liftPutStrLn)
@@ -41,7 +41,13 @@ sectionDetectorSocketFile = "/tmp/sectiondetector"
 playerCommand :: String -> Int -> FilePath -> CmdSpec
 playerCommand aspect start fp = ShellCommand $ "mpv --start="<> show start <>" --video-aspect " <> aspect <> " -volume 0 --input-unix-socket=" <> sectionDetectorSocketFile <> " '" <> fp <> "'"
 
-type TimeStamp = Int
+type TimeStamp = Double
+
+parseTimeStamp :: T.Text -> Maybe TimeStamp
+parseTimeStamp s = case double s of
+  Left _ -> Nothing
+  Right (x,_) -> Just x
+
 
 data Section = Section {
       _sectionBegin :: Int
@@ -69,7 +75,7 @@ myProcess fp = CreateProcess {
 data MpvJson = MpvJson {
     mpvEventType :: T.Text
   , mpvEventName :: T.Text
-  , mpvEventData :: T.Text 
+  , mpvEventData :: T.Text
   }
 
 instance FromJSON MpvJson where
@@ -93,24 +99,26 @@ data PlayState = PlayState {
 
 $(makeLenses ''PlayState)
 
-mainLoop :: Conduit String (State PlayState) Section
+mainLoop :: Conduit TimeStamp (State PlayState) Section
 mainLoop = do
-  timepos' <- await
-  case timepos' of
+  timeStamp' <- await
+  case timeStamp' of
     Nothing -> return ()
     Just timeStamp -> do
       ls <- use lastSeconds
       when (timeStamp - ls > 1) $ do
       --  liftPutStrLn "Seeked!"
         csb <- use currentSectionBegin
-        sections <>= [Section csb ls]
+        yield (Section csb (floor ls))
+        --sections <>= [Section csb ls]
         currentSectionBegin .= timeStamp
       lastSeconds .= timeStamp
       mainLoop
 
+toTimepos :: MpvJson -> Maybe Double
 toTimepos e =
   case mpvEventName e of
-    Just "time-pos" -> join mpvEventData
+    "time-pos" -> parseTimeStamp ( mpvEventData e )
     _ -> Nothing
 
 detectSections :: String -> Int -> FilePath -> IO [Section]
