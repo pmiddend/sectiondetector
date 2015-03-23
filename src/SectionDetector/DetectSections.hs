@@ -1,7 +1,8 @@
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TemplateHaskell       #-}
 module SectionDetector.DetectSections(
     detectSections
   , Section
@@ -11,14 +12,27 @@ module SectionDetector.DetectSections(
   , filterSections
   ) where
 
-import Control.Applicative
-import Data.Aeson(decode,FromJSON(..),Value(..),(.:))
+import Control.Concurrent(threadDelay)
+import           Control.Applicative
 import           Control.Lens
+import           Control.Monad.State.Class  (MonadState)
 import           Control.Monad.State.Strict
-import           Data.Monoid                ((<>),mempty)
-import           Data.Text                  (Text,pack)
+import           Data.Aeson                 (FromJSON (..), Value (..), decode,
+                                             (.:))
+import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Lazy       as BSL
+import           Data.Conduit               (Conduit, await, yield, ($$), ($=),
+                                             (=$), (=$=))
+import qualified Data.Conduit.List          as CL
+import           Data.Conduit.Network.Unix
+import qualified Data.Conduit.Text          as CT
+import           Data.Monoid                (mempty, (<>))
+import           Data.Text                  (Text, pack)
+import qualified Data.Text                  as T
+import           Data.Text.Encoding         (decodeUtf8', encodeUtf8)
 import           Data.Text.IO               (hGetLine)
-import           Data.Text.Read             (decimal,double)
+import qualified Data.Text.IO               as TIO
+import           Data.Text.Read             (decimal, double)
 import           Prelude                    hiding (putStrLn, read)
 import           SectionDetector.Exception  (tryAndDoNothing)
 import           SectionDetector.Lifted     (liftPutStrLn)
@@ -27,19 +41,15 @@ import           SectionDetector.Process    (createProcessPretty,
 import           System.IO                  (BufferMode (..), Handle,
                                              hSetBuffering)
 import           System.Process
-import Data.Conduit(await,yield,Conduit,(=$=),(=$),($=),($$))
-import qualified Data.Conduit.List as CL
-import Data.Conduit.Network.Unix
-import qualified Data.Conduit.Text as CT
-import Data.Text.Encoding(decodeUtf8',encodeUtf8)
-import qualified Data.ByteString as BS
-import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 
+sectionDetectorSocketFile :: String
 sectionDetectorSocketFile = "/tmp/sectiondetector"
 
+playerCommandStr :: String -> Int -> FilePath -> String
+playerCommandStr aspect start fp = "mpv --quiet --start="<> show start <>" --video-aspect " <> aspect <> " -volume 0 --input-unix-socket=" <> sectionDetectorSocketFile <> " '" <> fp <> "'"
+
 playerCommand :: String -> Int -> FilePath -> CmdSpec
-playerCommand aspect start fp = ShellCommand $ "mpv --start="<> show start <>" --video-aspect " <> aspect <> " -volume 0 --input-unix-socket=" <> sectionDetectorSocketFile <> " '" <> fp <> "'"
+playerCommand aspect start fp = ShellCommand $ playerCommandStr aspect start fp
 
 type TimeStamp = Double
 
@@ -82,34 +92,31 @@ instance FromJSON MpvJson where
   parseJSON (Object v) = MpvJson <$> (v .: "event") <*> (v .: "name") <*> (v .: "data")
   parseJSON _ = mzero
 
-decodeJsonOrFilter = do
-  v <- await
-  case v of
-    Nothing -> return ()
-    Just v' -> case decode v' of
-      Nothing -> decodeJsonOrFilter
-      Just v'' -> yield v'' >> decodeJsonOrFilter
-
 data PlayState = PlayState {
     _lastSeconds         :: TimeStamp
   , _currentSectionBegin :: TimeStamp
-  , _sections            :: [Section]
-  , _streamHandle        :: Handle
   }
 
 $(makeLenses ''PlayState)
 
-mainLoop :: Conduit TimeStamp (State PlayState) Section
+initialPlayState :: PlayState
+initialPlayState = PlayState {
+      _lastSeconds = 0
+    , _currentSectionBegin = 0
+    }
+
+mainLoop :: (MonadState PlayState m,MonadIO m) => Conduit TimeStamp m Section
 mainLoop = do
   timeStamp' <- await
   case timeStamp' of
     Nothing -> return ()
     Just timeStamp -> do
+      liftIO $ TIO.putStrLn $ "Got " <> ( T.pack . show $ timeStamp )
       ls <- use lastSeconds
       when (timeStamp - ls > 1) $ do
-      --  liftPutStrLn "Seeked!"
+        liftIO $ TIO.putStrLn $ "Seeked!"
         csb <- use currentSectionBegin
-        yield (Section csb (floor ls))
+        yield (Section (floor csb) (floor ls))
         --sections <>= [Section csb ls]
         currentSectionBegin .= timeStamp
       lastSeconds .= timeStamp
@@ -123,13 +130,18 @@ toTimepos e =
 
 detectSections :: String -> Int -> FilePath -> IO [Section]
 detectSections aspect start filename = do
+  TIO.putStrLn $ T.pack $ "Running " <> (playerCommandStr aspect start filename)
   output <- createProcessPretty (myProcess (playerCommand aspect start filename))
+  threadDelay ( 1000*1000 )
   runUnixClient (clientSettings sectionDetectorSocketFile) $ \app -> do
-    yield (encodeUtf8 "{ \"command\": [\"observe_property\", 1, \"time-pos\"]}") $$ appSink app
-    appSource app $= CT.decode CT.utf8 =$= CT.lines =$= CL.map decode =$= CL.catMaybes =$= toTimepos =$= CL.catMaybes
+    TIO.putStrLn "Yielding command"
+    yield (encodeUtf8 "{ \"command\": [\"observe_property\", 1, \"time-pos\"]}\n") $$ appSink app
+    TIO.putStrLn "Done, reading"
+    evalStateT ( appSource app $= CT.decode CT.utf8 =$= CT.lines =$= CL.map ( decode . BSL.fromStrict . encodeUtf8 ) =$= CL.catMaybes =$= CL.map toTimepos =$= CL.catMaybes =$= mainLoop $$ CL.consume ) initialPlayState
 
-filterSections :: TimeStamp -> [Section] -> [Section]
-filterSections ts = filter ((> ts) . (^. sectionDuration))
+filterSections :: Int -> [Section] -> [Section]
+--filterSections ts = filter ((> ts) . (^. sectionDuration))
+filterSections ts = id
 
 {-
 
